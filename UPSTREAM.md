@@ -216,28 +216,40 @@ observation 쪽 작업(W24)이 이 파일만 읽고 반영할 수 있게 쓴다.
 
 ## 9. 저장 전 마스킹
 
-- **파일**: `stack/otel-collector.yaml` 의 `transform/mask`, `test/masking.sh`
+- **파일**: `stack/otel-collector.yaml` 의 `transform/mask`, `test/masking.sh`, README "저장 전 마스킹"
 - **하네스와 다른 점**
   - 하네스는 조회 경로에서 가린다는 결정이다. 여기는 **저장 전**에 Collector 에서 바꾼다.
     조회 경로에서 가리면 Grafana Explore · Loki API 로 직접 보면 가려지지 않기 때문이다.
   - logs 파이프라인: `memory_limiter` → `transform/resource-allowlist` → **`transform/mask`** → `batch`
-  - 대상과 바뀐 모습
-    - 휴대전화(`01X` 국내 형식, `+82` 형식, 구분자 `-` `.` 공백 또는 없음) → `<masked:phone>`
-    - 이메일 → `<masked:email>`
-    - MySQL `Duplicate entry '<값>' for key` 의 `<값>` → `<masked>`
-  - 범위: 로그 본문(문자열 · 맵의 값)과 로그 레코드 속성의 문자열 값 전부. `exception.message` · `exception.stacktrace` 포함.
-  - RE2 에는 앞뒤 보기가 없어 `\b` 로 경계를 잡는다. 더 긴 숫자열 · UUID · trace ID 의 일부는 걸리지 않는다.
+  - 순서: 중복 키 값(한 줄 안) → 이메일(`@` · `%40`) → `+82` · `%2B82` · `0082` 전화 → `010` · `011` · `016`~`019` 전화.
+    이메일이 전화보다 먼저여야 `hong.010…@…` 이 통째로 가려진다.
+  - 경계: RE2 에 앞뒤 보기가 없어 "16진수가 아닌 문자 또는 줄 끝" 을 잡았다가 `${1}` · `${2}` 로 되돌린다(설정 파일에서는 `$` 를 `$$` 로 쓴다).
+    경계 문자를 하나 소비하므로 붙어 있는 두 번호를 위해 전화 패턴을 두 번씩 건다.
+    `\b` 를 쓰면 이스케이프된 `\n` · `_` 옆의 번호를 놓친다(`n` · `_` 가 단어 문자라서).
+  - 범위
+    - 본문: 맵 · 목록이면 `set(log.body, String(log.body))` 로 JSON 문자열로 바꾼 뒤 문자열 패턴을 건다.
+      `replace_all_patterns` 는 맵의 첫 단계 문자열만 보기 때문이다.
+    - 속성: `replace_all_patterns(log.attributes, "value", …)`. `exception.message` · `exception.stacktrace` 포함.
+  - `error_mode: ignore`. `propagate` 는 문 하나의 실패로 배치 전체를 버린다(503).
 - **실측** (로컬 + Floci, `test/masking.sh`, 2026-10-11)
-  - 본문 · 속성 · `exception.message` · `exception.stacktrace`(여러 줄, cause 두 개)에 넣은 전화 · 이메일 · 중복 키 값이
-    Loki 의 줄과 structured metadata 어디에도 남지 않았다. 맵 본문도 같다.
-  - 바뀌지 않아야 할 값이 그대로다: `event_id`, 32자리 trace ID(`010…` 으로 시작), `01012345-0101-…` 형태의 UUID,
-    UUID `aggregate_id`, 큐 이름 `destination`, 13자리 epoch ms, 7자리 숫자 ID, `010` 으로 시작하는 14자리 숫자열,
-    `Foo@1a2b3c` 형태의 객체 toString.
-  - 대조군: `transform/mask` 를 파이프라인에서 빼면 같은 시험이 `원문 '0000-0001' 이 저장됐다` 로 실패한다.
+  - 사례 22개를 속성 하나씩, 그리고 본문 한 줄에 이어 붙여 보냈다. 저장된 본문과 각 속성이 **필드마다 기대값과 정확히** 같다.
+    - 사례: 구분자 세 가지 · 붙여 쓰기 · `+82` 다섯 형식 · `(010)` · 이스케이프된 `\n` `\t` 옆 · `_` 옆 · 한글 옆 · 붙어 있는 두 번호 ·
+      `%40` 이메일 · 번호가 든 이메일 · 중복 키(한 줄, 두 줄에 걸친 두 개, `for key` 없는 앞의 것)
+    - `exception.message` · 여러 줄 `exception.stacktrace` 도 기대값과 같다.
+  - 바뀌지 않아야 할 11개가 그대로다: `010…` 으로 시작하는 trace ID · UUID · 16진수 ID, UUID `aggregate_id`, 큐 이름 `destination`,
+    13자리 epoch ms, 7자리 숫자 ID, 14자리 숫자열, `Foo@1a2b3c` 등
+  - 맵 본문(맵 · 목록 중첩)과 목록 본문의 중첩된 값까지 가려진다.
+    본문을 문자열로 바꾸기 전과 뒤에 Loki 에 저장된 줄을 비교했다. 맵 · 목록 본문의 JSON 모양(키 순서 · 숫자 타입)은 같고, 가려진 값만 다르다.
+    숫자 · 불리언 · 바이트 · 빈 본문은 앞뒤가 같다.
+  - 대조군
+    - `transform/mask` 를 빼면 첫 비교에서 실패한다.
+    - 이 항목의 첫 판(`\b` 경계, 전화 → 이메일 순서)으로 돌리면 `\n` · `_` 옆, `(010)`, `+82 (0)`, `0082`, `%2B82`, `%40`,
+      번호가 든 이메일 사례에서 실패하고, `for key` 없는 앞의 중복 키부터 다음 줄의 `for key` 까지를 통째로 지운다.
 - **미실측**
-  - 처리량에 대한 영향(정규식 12개 × 속성 수). 로그량을 아직 재지 않았다.
+  - 처리량에 대한 영향(정규식 문 13개 × 속성 수). 로그량을 아직 재지 않았다.
   - 실제 앱 예외(Hibernate · Spring 이 감싼 메시지)의 모양. 시험 문자열은 MySQL 메시지 형식을 손으로 만든 것이다.
 - **observation 에 넣을 때 주의**
   - 하네스의 "조회 경로 마스킹" 결정 문서를 이 결정으로 바꾸거나, 두 경로를 나란히 둔다는 것을 적는다.
   - 패턴은 한국 휴대전화 기준이다. 다른 나라 번호 · 유선 전화 · 실명 · 주소는 걸리지 않는다. 범용으로 쓰려면 패턴 목록을 설정으로 뺀다.
+  - 알려진 구멍과 오탐(README "걸리지 않는 것" · "오탐")을 같이 옮긴다.
   - 되돌릴 수 없다. 하네스의 디버깅 흐름이 원문을 기대한다면 로컬 프로필에서는 끌 수 있게 한다.
