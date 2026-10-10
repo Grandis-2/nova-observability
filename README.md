@@ -66,10 +66,11 @@ Grafana 는 호스트의 127.0.0.1:3000 에만 열려 있다. SSM 포트 포워�
 
 **admin 비밀번호 교체.** `GF_SECURITY_ADMIN_PASSWORD__FILE` 는 Grafana 를 처음 띄울 때만 적용된다.
 이미 있는 admin 의 비밀번호는 비밀번호 파일을 새 값으로 바꾼 뒤 호스트에서 아래로 바꾼다(로컬에서 확인).
+파일은 UID 472 만 읽을 수 있으므로 파일도 `sudo` 로 읽는다. 셸 리다이렉션(`<`)에는 `sudo` 가 걸리지 않는다.
 
 ```bash
-sudo docker exec -i obs-stack-grafana-1 grafana cli admin reset-admin-password --password-from-stdin \
-  < "$GRAFANA_ADMIN_PASSWORD_FILE"
+sudo cat <비밀번호 파일 경로> \
+  | sudo docker exec -i obs-stack-grafana-1 grafana cli admin reset-admin-password --password-from-stdin
 ```
 
 ## 앱이 줄 값 (nova)

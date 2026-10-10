@@ -27,6 +27,11 @@ DC=(docker compose -f stack/compose.yaml -f test/compose.local.yaml)
 LOKI="http://127.0.0.1:$OBS_LOKI_PORT"
 GRAFANA="http://127.0.0.1:$OBS_GRAFANA_PORT"
 
+# 컨테이너가 만든 파일(UID 10001 · 472, 0750)은 Linux 호스트 사용자가 지우지 못한다. 같은 바인드 마운트를 단 컨테이너 안에서 지운다.
+wipe() {
+  docker run --rm -v "$1:/d" alpine:3.20 find /d -mindepth 1 -delete
+}
+
 cleanup() {
   if [ "${KEEP:-0}" = 1 ]; then
     echo "KEEP=1 — 내리지 않는다. 내릴 때: COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME ${DC[*]} down -v; rm -rf $WORK"
@@ -34,6 +39,7 @@ cleanup() {
     return
   fi
   "${DC[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  wipe "$OBS_DATA_DIR" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT

@@ -24,7 +24,7 @@ pass "event_id · process.pid 는 인덱스 라벨이 아니다"
 
 # structured metadata 로 들어갔는지, 허용 목록 밖 리소스 속성(process.pid)이 버려졌는지
 meta="$(curl -s -G "$LOKI/loki/api/v1/query_range" -H 'X-Loki-Response-Encoding-Flags: categorize-labels' \
-  --data-urlencode "query={service_name=\"obs-smoke\"} | event_id=\"$EVENT_ID\"" --data-urlencode "since=1h" \
+  --data-urlencode "query={service_name=\"$SERVICE\"} | event_id=\"$EVENT_ID\"" --data-urlencode "since=1h" \
   | python3 -I -c 'import sys,json; d=json.load(sys.stdin)["data"]["result"]; print(json.dumps([v[2] for s in d for v in s["values"]][:1]))')"
 echo "  structured metadata: $meta"
 echo "$meta" | grep -q '"event_id"' || fail "event_id 가 structured metadata 에 없다"
@@ -65,7 +65,7 @@ echo "$objs" | grep -q 'index/index_' || fail "S3 에 TSDB 인덱스(index/index
 echo "$objs" | grep -v 'index/' | grep -q . || fail "S3 에 청크가 없다"
 pass "flush_on_shutdown: 청크·인덱스가 S3 에 올라갔다"
 # WAL · 인덱스 캐시를 지운다. 그래도 찾히면 읽기가 S3 에서 왔다는 뜻이다.
-rm -rf "${OBS_DATA_DIR:?}/loki/"*
+wipe "${OBS_DATA_DIR:?}/loki"
 "${DC[@]}" start loki >/dev/null
 wait_ready
 n="$(poll_event "$LOKI")"

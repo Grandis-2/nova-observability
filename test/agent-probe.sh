@@ -93,10 +93,11 @@ EVENT_ID="$(uuidgen | tr 'A-Z' 'a-z')"
 out="$(run_probe "$EVENT_ID")"
 echo "$out" | grep -E 'probe:|Failed to export|WARN|ERROR|agent will not' | head -4 | cut -c1-240 | sed 's/^/    /'
 sleep 5
-[ "$(count_event "$LOKI")" = 0 ] && pass "도착하지 않음 — 에이전트 기본 프로토콜은 http/protobuf, :4317 은 gRPC 다"
+n="$(count_event "$LOKI")"
+[ "$n" = 0 ] || fail "프로토콜 없이도 도착했다(${n}줄) — 이 시험의 전제가 틀렸다"
 echo "$out" | grep -q 'javaagent=true' && ! echo "$out" | grep -q 'agent will not be started' \
-  || fail "에이전트가 붙지 않은 상태라 A 의 결과가 프로토콜 때문인지 알 수 없다" \
-  || fail "프로토콜 없이도 도착했다 — 이 시험의 전제가 틀렸다"
+  || fail "에이전트가 붙지 않은 상태라 A 의 결과가 프로토콜 때문인지 알 수 없다"
+pass "도착하지 않음 — 에이전트 기본 프로토콜은 http/protobuf, :4317 은 gRPC 다"
 
 echo "── B. OTEL_EXPORTER_OTLP_PROTOCOL=grpc"
 EVENT_ID="$(uuidgen | tr 'A-Z' 'a-z')"
@@ -124,7 +125,8 @@ for aws in default true; do
   [ "$aws" = true ] && extra+=(OTEL_RESOURCE_PROVIDERS_AWS_ENABLED=true)
   out="$(run_probe "$EVENT_ID" "${extra[@]}")"
   emitted="$(echo "$out" | resource_keys)"
-  poll_event "$LOKI" >/dev/null
+  n="$(poll_event "$LOKI")"
+  [ "$n" -ge 1 ] || fail "AWS 리소스 감지=$aws 의 로그가 Loki 에 오지 않았다 — 저장된 키를 볼 수 없다"
   stored="$(stored_keys)"
   echo "    AWS 리소스 감지=$aws"
   echo "      에이전트가 만든 리소스 속성: $emitted"

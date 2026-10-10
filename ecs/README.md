@@ -9,7 +9,7 @@
 |---|---|
 | `volumes` | `otel-agent` 볼륨 추가 (Fargate 태스크 임시 저장소) |
 | `containerDefinitions` | `otel-agent-init` 추가. jar 만 든 이미지에서 jar 을 볼륨으로 복사하고 끝난다(`essential: false`) |
-| 앱 컨테이너 | `appContainerPatch` 의 세 필드를 **기존 배열에 덧붙인다**(바꿔치기 아님): `dependsOn`(init 이 `SUCCESS` 로 끝날 때까지 기다림), `mountPoints`(읽기 전용), `environment` |
+| 앱 컨테이너 | `appContainerPatch` 의 세 필드를 기존 값에 합친다(통째로 바꾸지 않는다). `dependsOn`(init 이 `SUCCESS` 로 끝날 때까지 기다림) · `mountPoints`(읽기 전용)는 덧붙인다. `environment` 는 **이름이 이미 있으면 그 항목의 값을 바꾸고, 없는 이름만 덧붙인다** — 같은 이름이 두 번 있으면 어느 값이 쓰일지 정해져 있지 않다. `JAVA_TOOL_OPTIONS` 는 아래 병합 규칙의 값으로 바꾼다 |
 
 init 이미지는 OpenTelemetry Operator 가 쓰는 `autoinstrumentation-java` 다.
 - 태그와 다이제스트로 고정했다.
