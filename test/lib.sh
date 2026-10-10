@@ -1,4 +1,4 @@
-# smoke.sh · retention.sh 가 같이 쓴다. source 해서 쓴다.
+# smoke.sh · retention.sh · masking.sh · agent-probe.sh 가 같이 쓴다. source 해서 쓴다.
 # stack/ 을 test/compose.local.yaml(S3 대신 Floci)과 함께 띄우는 데 필요한 값과 함수.
 # 포트는 다른 스택과 겹치지 않게 1xxxx 를 쓴다. KEEP=1 이면 끝나도 내리지 않는다.
 cd "$(dirname "${BASH_SOURCE[0]}")/.."

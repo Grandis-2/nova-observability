@@ -213,3 +213,31 @@ observation 쪽 작업(W24)이 이 파일만 읽고 반영할 수 있게 쓴다.
 - **observation 에 넣을 때 주의**
   - 하네스는 세 신호를 다 쓰므로 Collector 를 올리면 하네스 스모크 전체를 다시 돌린다.
   - Loki 3.3 → 3.7 은 이 저장소의 로그 경로에서만 확인했다.
+
+## 9. 저장 전 마스킹
+
+- **파일**: `stack/otel-collector.yaml` 의 `transform/mask`, `test/masking.sh`
+- **하네스와 다른 점**
+  - 하네스는 조회 경로에서 가린다는 결정이다. 여기는 **저장 전**에 Collector 에서 바꾼다.
+    조회 경로에서 가리면 Grafana Explore · Loki API 로 직접 보면 가려지지 않기 때문이다.
+  - logs 파이프라인: `memory_limiter` → `transform/resource-allowlist` → **`transform/mask`** → `batch`
+  - 대상과 바뀐 모습
+    - 휴대전화(`01X` 국내 형식, `+82` 형식, 구분자 `-` `.` 공백 또는 없음) → `<masked:phone>`
+    - 이메일 → `<masked:email>`
+    - MySQL `Duplicate entry '<값>' for key` 의 `<값>` → `<masked>`
+  - 범위: 로그 본문(문자열 · 맵의 값)과 로그 레코드 속성의 문자열 값 전부. `exception.message` · `exception.stacktrace` 포함.
+  - RE2 에는 앞뒤 보기가 없어 `\b` 로 경계를 잡는다. 더 긴 숫자열 · UUID · trace ID 의 일부는 걸리지 않는다.
+- **실측** (로컬 + Floci, `test/masking.sh`, 2026-10-11)
+  - 본문 · 속성 · `exception.message` · `exception.stacktrace`(여러 줄, cause 두 개)에 넣은 전화 · 이메일 · 중복 키 값이
+    Loki 의 줄과 structured metadata 어디에도 남지 않았다. 맵 본문도 같다.
+  - 바뀌지 않아야 할 값이 그대로다: `event_id`, 32자리 trace ID(`010…` 으로 시작), `01012345-0101-…` 형태의 UUID,
+    UUID `aggregate_id`, 큐 이름 `destination`, 13자리 epoch ms, 7자리 숫자 ID, `010` 으로 시작하는 14자리 숫자열,
+    `Foo@1a2b3c` 형태의 객체 toString.
+  - 대조군: `transform/mask` 를 파이프라인에서 빼면 같은 시험이 `원문 '0000-0001' 이 저장됐다` 로 실패한다.
+- **미실측**
+  - 처리량에 대한 영향(정규식 12개 × 속성 수). 로그량을 아직 재지 않았다.
+  - 실제 앱 예외(Hibernate · Spring 이 감싼 메시지)의 모양. 시험 문자열은 MySQL 메시지 형식을 손으로 만든 것이다.
+- **observation 에 넣을 때 주의**
+  - 하네스의 "조회 경로 마스킹" 결정 문서를 이 결정으로 바꾸거나, 두 경로를 나란히 둔다는 것을 적는다.
+  - 패턴은 한국 휴대전화 기준이다. 다른 나라 번호 · 유선 전화 · 실명 · 주소는 걸리지 않는다. 범용으로 쓰려면 패턴 목록을 설정으로 뺀다.
+  - 되돌릴 수 없다. 하네스의 디버깅 흐름이 원문을 기대한다면 로컬 프로필에서는 끌 수 있게 한다.
