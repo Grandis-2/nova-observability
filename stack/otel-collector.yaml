@@ -1,0 +1,65 @@
+# 로그 전용 Collector. 트레이스·메트릭 파이프라인은 두지 않는다.
+# 앱이 traces/metrics 를 보내면 받지 않는다 — 파이프라인이 없어 receiver 가 그 경로를 열지 않는다(HTTP /v1/traces → 404).
+#
+# 이 경로는 손실을 허용한다 — 디스크 큐가 없고, 메모리가 차면 memory_limiter 가 받기를 거부한다.
+# 정본이 필요한 기록은 이 경로에 기대지 않는다.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # compose 의 mem_limit(768m) 안에서 GC 여유를 남긴다.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  batch:
+    timeout: 1s
+
+  # 카디널리티 예산. 리소스 속성은 남길 것만 고른다(빼는 방식이 아니라 남기는 방식).
+  # 여기를 통과한 리소스 속성은 Loki 에서 인덱스 라벨(loki.yaml 의 index_label)이거나
+  # structured metadata 가 된다. 목록에 없는 속성은 저장되지 않는다.
+  #
+  # process.pid · process.command_args · os.description 은 조회 축이 아니면서 길거나 재시작마다 바뀐다.
+  # aws.ecs.* 는 넣지 않았다. aws.ecs.task.arn · cluster.arn 에 계정 ID 가 들어 있고,
+  # 태스크를 가리키는 데는 service.instance.id 와 host.name 으로 충분하다.
+  transform/resource-allowlist:
+    error_mode: ignore
+    log_statements:
+      - context: resource
+        statements:
+          - keep_keys(attributes, [
+              "service.name",
+              "service.version",
+              "service.namespace",
+              "service.instance.id",
+              "deployment.environment",
+              "deployment.environment.name",
+              "k8s.cluster.name",
+              "k8s.namespace.name",
+              "k8s.pod.name",
+              "k8s.deployment.name",
+              "host.name"
+            ])
+
+  # 저장 전 마스킹은 이 자리에 들어간다(아직 없다). README "하지 않는 것" 참고.
+
+exporters:
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/resource-allowlist, batch]
+      exporters: [otlphttp/loki]
+  telemetry:
+    logs:
+      level: info

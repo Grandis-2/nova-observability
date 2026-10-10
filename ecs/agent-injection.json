@@ -1,0 +1,37 @@
+{
+  "volumes": [
+    { "name": "otel-agent" }
+  ],
+  "containerDefinitions": [
+    {
+      "name": "otel-agent-init",
+      "image": "ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.32.0@sha256:9dad1c6e3e2ecee48fc164a19bcfde703510bee972c8cb421689fde89b5f89e9",
+      "essential": false,
+      "command": ["cp", "/javaagent.jar", "/otel/javaagent.jar"],
+      "readonlyRootFilesystem": true,
+      "mountPoints": [
+        { "sourceVolume": "otel-agent", "containerPath": "/otel" }
+      ]
+    }
+  ],
+  "appContainerPatch": {
+    "dependsOn": [
+      { "containerName": "otel-agent-init", "condition": "SUCCESS" }
+    ],
+    "mountPoints": [
+      { "sourceVolume": "otel-agent", "containerPath": "/otel", "readOnly": true }
+    ],
+    "environment": [
+      { "name": "JAVA_TOOL_OPTIONS", "value": "<이미지의 기존 JAVA_TOOL_OPTIONS> -javaagent:/otel/javaagent.jar" },
+      { "name": "OTEL_SERVICE_NAME", "value": "<service-name>" },
+      { "name": "OTEL_RESOURCE_ATTRIBUTES", "value": "deployment.environment=<env>,service.namespace=<namespace>" },
+      { "name": "OTEL_LOGS_EXPORTER", "value": "otlp" },
+      { "name": "OTEL_TRACES_EXPORTER", "value": "none" },
+      { "name": "OTEL_METRICS_EXPORTER", "value": "none" },
+      { "name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://<obs-host>:4317" },
+      { "name": "OTEL_EXPORTER_OTLP_PROTOCOL", "value": "grpc" },
+      { "name": "OTEL_INSTRUMENTATION_LOGBACK_APPENDER_EXPERIMENTAL_MDC_ATTRIBUTES_INCLUDED", "value": "<MDC 키 목록, 예: traceId>" },
+      { "name": "OTEL_INSTRUMENTATION_COMMON_LOGGING_STRUCTURED_ATTRIBUTES_INCLUDED", "value": "<key-value 키 목록 또는 *>" }
+    ]
+  }
+}

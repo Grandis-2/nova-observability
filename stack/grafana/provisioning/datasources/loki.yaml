@@ -1,0 +1,13 @@
+# 이 스택의 Grafana 는 Loki 하나만 본다. 트레이스·메트릭 데이터소스는 두지 않는다.
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: true
+    editable: false
+    jsonData:
+      maxLines: 1000

@@ -1,0 +1,101 @@
+# 단일 바이너리 Loki. 청크·인덱스는 S3, 아직 올라가지 않은 데이터(WAL)와 작업 파일은 로컬 디스크(/loki).
+# -config.expand-env=true 로 띄운다. 값은 compose 가 넘긴다:
+#   LOKI_S3_BUCKET · LOKI_S3_REGION · LOKI_RETENTION_PERIOD (필수)
+#   LOKI_S3_ENDPOINT · LOKI_S3_FORCE_PATH_STYLE · LOKI_S3_INSECURE (로컬 S3 대체용. 실제 AWS 에서는 비운다)
+#   LOKI_COMPACTION_INTERVAL(10m) · LOKI_RETENTION_DELETE_DELAY(2h) (보존 시험을 빨리 돌릴 때만 바꾼다)
+#
+# 자격 증명은 여기 없다. 비어 있으면 AWS SDK 기본 체인을 쓴다 — EC2 에서는 instance profile(IMDS)이다.
+#
+# Loki 는 라벨 조합마다 스트림을 만든다. 라벨 하나가 늘면 스트림이 곱으로 늘어난다.
+# 그래서 "무엇을 인덱스 라벨로 올릴지" 가 카디널리티 설계의 전부다.
+# trace_id · event_id 같은 값은 조회 축이지 그룹 축이 아니다. 스트림 라벨이 되면 값마다 스트림이 생겨
+# Loki 가 무너진다. structured metadata 로 넣으면 조회는 그대로 되면서 스트림은 늘지 않는다.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+  storage:
+    s3:
+      bucketnames: ${LOKI_S3_BUCKET}
+      region: ${LOKI_S3_REGION}
+      endpoint: ${LOKI_S3_ENDPOINT:-}
+      s3forcepathstyle: ${LOKI_S3_FORCE_PATH_STYLE:-false}
+      insecure: ${LOKI_S3_INSECURE:-false}
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb            # structured metadata 는 tsdb + v13 에서만 쓸 수 있다
+      object_store: s3
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+
+ingester:
+  # 아직 S3 로 올라가지 않은 청크를 재시작 뒤 되살리는 근거. /loki 는 영속 디스크여야 한다.
+  wal:
+    enabled: true
+    dir: /loki/wal
+    # 정상 종료(docker stop)면 들고 있던 청크를 S3 로 올리고 내려간다. compose 의 stop_grace_period 가 그 시간을 준다.
+    flush_on_shutdown: true
+
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: ${LOKI_COMPACTION_INTERVAL:-10m}
+  # 보존 기간이 지난 청크와 인덱스를 지우는 것은 compactor 다. S3 수명주기는 안전망일 뿐이다.
+  retention_enabled: true
+  retention_delete_delay: ${LOKI_RETENTION_DELETE_DELAY:-2h}
+  delete_request_store: s3
+
+limits_config:
+  retention_period: ${LOKI_RETENTION_PERIOD}
+  # 보존 기간보다 먼 과거를 물으면 지워진 구간을 빈 결과로 돌려주는 대신 범위를 잘라 준다.
+  max_query_lookback: ${LOKI_RETENTION_PERIOD}
+  allow_structured_metadata: true
+  volume_enabled: true
+  # 삭제 요청 API 를 끈다. 보존 기간에 따른 삭제(compactor)와는 별개다.
+  # Loki API 에는 인증이 없어(auth_enabled: false) 같은 컨테이너 망의 누구든 지울 수 있게 되기 때문이다.
+  deletion_mode: disabled
+
+  otlp_config:
+    resource_attributes:
+      # 기본 승격 목록을 쓰지 않고 우리가 정한 것만 인덱스 라벨로 올린다.
+      # 여기 없는 리소스 속성(Collector 허용 목록을 통과한 것)은 structured metadata 가 된다.
+      ignore_defaults: true
+      attributes_config:
+        - action: index_label
+          attributes:
+            - service.name
+            - service.namespace
+            - deployment.environment
+            - deployment.environment.name
+            - k8s.namespace.name
+            - k8s.deployment.name
+    # 스코프와 로그 레코드 속성은 전부 structured metadata 로 보낸다.
+    scope_attributes:
+      - action: structured_metadata
+        regex: .*
+    log_attributes:
+      - action: structured_metadata
+        regex: .*
+
+# 사용 통계를 grafana.com 으로 보내지 않는다.
+analytics:
+  reporting_enabled: false

@@ -1,0 +1,42 @@
+# 로컬 시험용 덮어쓰기. 실제 S3 대신 Floci(로컬 AWS 에뮬레이터)의 S3 를 쓴다.
+# 실제 AWS 와 다른 점: 자격 증명이 instance profile 이 아니라 고정 키(test/test)이고,
+# 경로 방식 주소(path-style) · http 다. 버킷 정책·암호화·수명주기는 이 시험에서 보지 않는다.
+services:
+  s3:
+    image: floci/floci:2.1.0
+    networks: [obs]
+    logging:
+      driver: none
+
+  s3-bucket:
+    image: amazon/aws-cli:2.27.50
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: ${LOKI_S3_REGION}
+      BUCKET: ${LOKI_S3_BUCKET}
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        for i in $$(seq 1 60); do
+          aws --endpoint-url http://s3:4566 s3api head-bucket --bucket "$$BUCKET" 2>/dev/null && exit 0
+          aws --endpoint-url http://s3:4566 s3api create-bucket --bucket "$$BUCKET" \
+            --create-bucket-configuration LocationConstraint="$$AWS_DEFAULT_REGION" >/dev/null 2>&1 && exit 0
+          sleep 1
+        done
+        exit 1
+    depends_on:
+      - s3
+    networks: [obs]
+    restart: "no"
+
+  loki:
+    environment:
+      LOKI_S3_ENDPOINT: s3:4566
+      LOKI_S3_FORCE_PATH_STYLE: "true"
+      LOKI_S3_INSECURE: "true"
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    depends_on:
+      s3-bucket:
+        condition: service_completed_successfully

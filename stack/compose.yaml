@@ -1,0 +1,116 @@
+# 관측 호스트 한 대에서 도는 로그 스택: OTel Collector → Loki(S3) → Grafana.
+# 어느 시스템에서든 그대로 쓴다. 시스템마다 다른 값은 전부 환경 변수로 받는다(아래 "필수").
+#
+# 필수
+#   OBS_DATA_DIR                 영속 디스크 경로. loki/(WAL·인덱스 캐시·compactor) 와 grafana/ 가 여기 생긴다
+#   LOKI_S3_BUCKET               청크·인덱스 버킷
+#   LOKI_S3_REGION               버킷 리전
+#   LOKI_RETENTION_PERIOD        보존 기간 (예: 2160h). 조회 가능 범위(max_query_lookback)도 같은 값이다
+#   GRAFANA_ADMIN_PASSWORD_FILE  Grafana admin 비밀번호 한 줄이 든 파일 (UID 472 가 읽을 수 있어야 한다)
+# 선택
+#   OBS_OTLP_GRPC_PORT(4317) · OBS_OTLP_HTTP_PORT(4318)   — 모든 인터페이스. 접근 제어는 호스트 방화벽(보안 그룹)이 한다
+#   OBS_GRAFANA_PORT(3000) · OBS_LOKI_PORT(3100)          — 127.0.0.1 에만 연다. 원격에서는 포트 포워딩으로 들어온다
+#   LOKI_S3_ENDPOINT · LOKI_S3_FORCE_PATH_STYLE · LOKI_S3_INSECURE — S3 호환 저장소(로컬 시험)용
+#   LOKI_COMPACTION_INTERVAL(10m) · LOKI_RETENTION_DELETE_DELAY(2h) — 보존 시험을 빨리 돌릴 때만
+#   OBS_DOCKER_SUBNET(172.30.255.0/24) · OBS_LOKI_IPV4(172.30.255.10) — 컨테이너 망. 호스트 망 · VPC 와 겹치면 바꾼다
+#
+# Loki 만 고정 IP 를 갖는다. 호스트가 클라우드 자격 증명(EC2 IMDS 등)을 이 IP 에만 열어 줄 수 있게 하려는 것이다.
+# 이미지는 태그와 다이제스트로 고정한다. linux/arm64 와 linux/amd64 를 모두 낸다(멀티 아키텍처 매니페스트).
+name: obs-stack
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
+# 세 컨테이너 모두 리눅스 권한(capability)이 필요 없다. 1024 위 포트만 쓴다.
+x-hardening: &hardening
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.162.0@sha256:39923a8e431bd1f57be82411999d389fcfe40857492e4365456d97a4c1f74be6
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "${OBS_OTLP_GRPC_PORT:-4317}:4317"
+      - "${OBS_OTLP_HTTP_PORT:-4318}:4318"
+    mem_limit: 768m
+    restart: unless-stopped
+    logging: *logging
+    <<: *hardening
+    networks: [obs]
+    depends_on:
+      - loki
+
+  loki:
+    image: grafana/loki:3.7.8@sha256:1107dd5274e0ada47e42472b7a7e71f3b2a2fe878878108f3e2f9e51528f0193
+    command: ["-config.file=/etc/loki/loki.yaml", "-config.expand-env=true"]
+    environment:
+      LOKI_S3_BUCKET: ${LOKI_S3_BUCKET:?LOKI_S3_BUCKET 을 지정한다}
+      LOKI_S3_REGION: ${LOKI_S3_REGION:?LOKI_S3_REGION 을 지정한다}
+      LOKI_RETENTION_PERIOD: ${LOKI_RETENTION_PERIOD:?LOKI_RETENTION_PERIOD 를 지정한다 (예 2160h)}
+      LOKI_S3_ENDPOINT: ${LOKI_S3_ENDPOINT:-}
+      LOKI_S3_FORCE_PATH_STYLE: ${LOKI_S3_FORCE_PATH_STYLE:-false}
+      LOKI_S3_INSECURE: ${LOKI_S3_INSECURE:-false}
+      LOKI_COMPACTION_INTERVAL: ${LOKI_COMPACTION_INTERVAL:-10m}
+      LOKI_RETENTION_DELETE_DELAY: ${LOKI_RETENTION_DELETE_DELAY:-2h}
+    volumes:
+      - ./loki.yaml:/etc/loki/loki.yaml:ro
+      # 컨테이너는 UID 10001 로 돈다. 호스트 디렉터리 소유자를 맞춰 둔다.
+      - ${OBS_DATA_DIR:?OBS_DATA_DIR 를 지정한다}/loki:/loki
+    ports:
+      - "127.0.0.1:${OBS_LOKI_PORT:-3100}:3100"
+    mem_limit: 2g
+    <<: *hardening
+    networks:
+      obs:
+        ipv4_address: ${OBS_LOKI_IPV4:-172.30.255.10}
+    # flush_on_shutdown 이 메모리의 청크를 S3 로 올릴 시간. 기본 10초면 중간에 SIGKILL 된다.
+    stop_grace_period: 2m
+    restart: unless-stopped
+    logging: *logging
+
+  grafana:
+    image: grafana/grafana:12.4.12@sha256:83be3e511ede559bee80e2215bb1987cb1246075461cb961beb515b0341e7aea
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SECURITY_ADMIN_USER: admin
+      # 최초 기동 때만 적용된다. 이미 만든 admin 의 비밀번호를 바꾸는 절차는 README.
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_PLUGINS_PLUGIN_ADMIN_ENABLED: "false"
+    secrets:
+      - grafana_admin_password
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      # 컨테이너는 UID 472 로 돈다.
+      - ${OBS_DATA_DIR:?OBS_DATA_DIR 를 지정한다}/grafana:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${OBS_GRAFANA_PORT:-3000}:3000"
+    mem_limit: 512m
+    restart: unless-stopped
+    logging: *logging
+    <<: *hardening
+    networks: [obs]
+    depends_on:
+      - loki
+
+networks:
+  obs:
+    ipam:
+      config:
+        - subnet: ${OBS_DOCKER_SUBNET:-172.30.255.0/24}
+
+secrets:
+  grafana_admin_password:
+    file: ${GRAFANA_ADMIN_PASSWORD_FILE:?GRAFANA_ADMIN_PASSWORD_FILE 을 지정한다}
