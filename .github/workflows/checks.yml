@@ -1,0 +1,27 @@
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 범용 디렉터리에 nova 가 없다
+        run: ./scripts/check-generic.sh
+
+      - name: compose 설정 해석
+        env:
+          OBS_DATA_DIR: /tmp/obs
+          LOKI_S3_BUCKET: example
+          LOKI_S3_REGION: ap-northeast-2
+          LOKI_RETENTION_PERIOD: 2160h
+          GRAFANA_ADMIN_PASSWORD_FILE: /dev/null
+        run: docker compose -f stack/compose.yaml config --quiet
