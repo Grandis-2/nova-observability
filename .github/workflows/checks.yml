@@ -25,3 +25,10 @@ jobs:
           LOKI_RETENTION_PERIOD: 2160h
           GRAFANA_ADMIN_PASSWORD_FILE: /dev/null
         run: docker compose -f stack/compose.yaml config --quiet
+
+      # transform 문(OTTL)은 Collector 가 띄울 때 해석한다. 문법이 틀리면 Collector 가 뜨지 않으므로 여기서 먼저 본다.
+      - name: Collector 설정 해석
+        run: |
+          image="$(sed -n 's/^ *image: \(otel\/opentelemetry-collector-contrib:.*\)$/\1/p' stack/compose.yaml)"
+          test -n "$image"
+          docker run --rm -v "$PWD/stack/otel-collector.yaml:/c.yaml:ro" "$image" validate --config=/c.yaml

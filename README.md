@@ -61,7 +61,7 @@ Grafana 는 호스트의 127.0.0.1:3000 에만 열려 있다. SSM 포트 포워�
 
 ```
 {service_name="nova-preorder", deployment_environment="prod"} | event_id="<uuid>"
-{service_name=~"nova-.+"} | aggregate_type="PREORDER" | aggregate_id="123"
+{service_name=~"nova-.+"} | aggregate_type="PREORDER" | aggregate_id="<uuid>"
 ```
 
 **admin 비밀번호 교체.** `GF_SECURITY_ADMIN_PASSWORD__FILE` 는 Grafana 를 처음 띄울 때만 적용된다.
@@ -87,11 +87,12 @@ OTEL_METRICS_EXPORTER=none
 OTEL_EXPORTER_OTLP_ENDPOINT=http://obs.<Cloud Map 네임스페이스>:4317
 OTEL_EXPORTER_OTLP_PROTOCOL=grpc                                     # 빼면 로그가 하나도 오지 않는다
 OTEL_INSTRUMENTATION_LOGBACK_APPENDER_EXPERIMENTAL_MDC_ATTRIBUTES_INCLUDED=traceId
-OTEL_INSTRUMENTATION_COMMON_LOGGING_STRUCTURED_ATTRIBUTES_INCLUDED=event_id,aggregate_type,aggregate_id,event_type
+OTEL_INSTRUMENTATION_COMMON_LOGGING_STRUCTURED_ATTRIBUTES_INCLUDED=event_id,aggregate_type,aggregate_id,event_type,destination
 ```
 
 - `JAVA_TOOL_OPTIONS` 앞의 두 플래그는 nova 앱 이미지(`docker/Dockerfile`)의 값이다. 이미지가 바뀌면 다시 확인한다.
 - MDC 는 `traceId`(요청 ID)만 받는다. `subject`(회원 ID)는 받지 않는다.
+- `aggregate_id` 는 숫자가 아니라 **UUID 문자열**이다. `destination` 은 outbox 가 발행한 큐 이름이다.
 
 ## 보안 판단 (스택)
 
@@ -104,11 +105,50 @@ OTEL_INSTRUMENTATION_COMMON_LOGGING_STRUCTURED_ATTRIBUTES_INCLUDED=event_id,aggr
 - 컨테이너는 모든 리눅스 권한을 버리고(`cap_drop: ALL`) `no-new-privileges` 로 돈다. Grafana 플러그인 관리는 꺼져 있다.
 - Collector 는 리소스 속성을 허용 목록으로만 남긴다. ECS 감지를 켜면 붙는 `aws.ecs.*` · `cloud.account.id` 는 계정 ID 를 담는데, 이것도 버린다(UPSTREAM 7).
 
+## 저장 전 마스킹
+
+Collector 가 Loki 에 넘기기 전에 개인정보 원문을 고정 표시로 바꾼다(`stack/otel-collector.yaml` 의 `transform/mask`).
+
+- **왜 저장 전인가.** 조회 경로에서 가리면 Grafana Explore · Loki API 로 직접 볼 때 가려지지 않는다.
+  저장 전에 지우면 Loki 에서는 어느 경로로 읽어도 원문이 없다.
+- **무엇을** — 이 순서로 바꾼다
+
+  | 대상 | 바뀐 모습 |
+  |---|---|
+  | MySQL 중복 키 값 — `Duplicate entry '<값>' for key '<키>'` 의 `<값>`. 키 이름과 상관없이, 한 줄 안에서만 | `Duplicate entry '<masked>' for key '<키>'` |
+  | 이메일 — `local@domain.tld`, URL 인코딩된 `local%40domain.tld` | `<masked:email>` |
+  | 국제 형식 휴대전화 — `+82` · `%2B82` · `0082`, `(0)` 허용 | `<masked:phone>` |
+  | 휴대전화 — `010` · `011` · `016`~`019`. 괄호(`(010)`) · 구분자(`-` `.` 공백) 있거나 없거나 | `<masked:phone>` |
+
+  - 이메일을 전화보다 먼저 바꾼다. 그래야 `hong.01012345678@…` 같은 주소가 통째로 가려진다.
+  - **경계.** 번호 앞뒤가 16진수 문자(`0-9` `a-f` `A-F`)가 아니어야 건다.
+    `+82` · `%2B82` 는 앞을 보지 않는다. `+` · `%` 는 16진수 ID 에 들어갈 수 없어 그 자체가 경계이고, 앞을 보면 `phone+82…` 같은 번호를 놓친다.
+    그래서 UUID · trace ID · 16진수 ID 안의 숫자는 걸리지 않고, 이스케이프된 `\n`(역슬래시 + n) · `_` · 한글 바로 옆에 붙은 번호는 걸린다.
+- **어디에**
+  - 로그 본문. 맵 · 목록 본문은 먼저 JSON 문자열로 바꾼 뒤 건다. 그래서 중첩된 값까지 가려진다.
+    Loki 는 원래도 맵 본문을 같은 JSON 으로 저장하므로 저장 모습과 `| json` 조회는 바뀌지 않는다(로컬에서 앞뒤를 비교했다).
+  - 로그 레코드 속성의 모든 문자열 값. `exception.message` · `exception.stacktrace` 도 속성이라 같이 걸린다.
+- **바뀌지 않는 것** (`test/masking.sh` 가 확인한다)
+  - `event_id` · `traceId` · `aggregate_id`(UUID) · `destination`
+  - 13자리 epoch ms, `1234567` 같은 숫자 ID, `010…` 으로 시작하는 14자리 숫자열 · 16진수 ID, `Foo@1a2b3c`
+  - 단, 0 을 채운 `010…` 10~11자리 숫자 ID 는 전화번호와 구별되지 않아 가려진다. nova 의 `aggregate_id` 는 UUID 라 해당하지 않는다.
+- **되돌릴 수 없다.** Loki 에는 원문이 남지 않는다. 조사에는 원문이 필요 없으므로 받아들인다.
+  같은 로그의 CloudWatch(`awslogs`) 사본은 이 Collector 를 거치지 않으므로 **원문 그대로 남는다.**
+- **안전망이다.** 1차 방어는 앱이 애초에 남기지 않는 것이다(outbox payload 를 로그에 넣지 않는다 등).
+- **`error_mode: ignore`.** 문 하나가 실패하면 그 문만 건너뛰고 다음 문으로 간다. 그 로그는 그 패턴이 덜 가려진 채 저장된다.
+  `propagate` 는 0.162.0 에서 배치 전체를 버린다(보낸 쪽에 503). 관측 경로 때문에 로그를 통째로 잃는 쪽을 택하지 않았다.
+- **걸리지 않는 것**
+  - 패턴 밖의 개인정보: 실명 · 주소 · 유선 전화 · 외국 번호 · 카카오 ID 단독
+  - 16진수 글자 바로 옆에 붙은 번호: `phone01012345678`(`e`) · `01012345678abc`
+  - `for key` 가 같은 줄에 없는 중복 키 메시지(잘린 메시지)의 값
+  - 맵 · 목록 **속성** 안에 중첩된 값, 바이트 본문(Loki 는 base64 로 저장), 스코프 속성
+  - 리소스 속성. 허용 목록이 서비스 · 호스트 식별자만 남겨 사용자 값이 들어올 자리가 없다.
+- **오탐**: 경계만 맞으면 번호가 아닌 것도 가린다
+  - `0.0101234567` → `0.<masked:phone>`
+  - `010-1234-5678-90` → `<masked:phone>-90`
+
 ## 하지 않는 것
 
-- **저장 전 마스킹(작업 4).** 이 PR 범위가 아니다. 지금은 Collector 가 로그 본문 · 속성을 그대로 저장한다.
-  - 전화번호 · 이메일 · `Duplicate entry '<값>'` 같은 원문이 로그에 있으면 그대로 남는다.
-  - 마스킹은 `stack/otel-collector.yaml` 의 logs 파이프라인에 들어간다.
 - **outbox 정본 보관.** 이 경로는 손실을 허용한다.
   - Collector 에 디스크 큐가 없다.
   - 메모리가 차면 받기를 거부한다.
@@ -125,6 +165,7 @@ OTEL_INSTRUMENTATION_COMMON_LOGGING_STRUCTURED_ATTRIBUTES_INCLUDED=event_id,aggr
 | 끝까지 한 건 | `test/smoke.sh` | 로컬 Docker, S3 는 Floci |
 | 보존 기간이 지나면 compactor 가 S3 에서 지운다 | `test/retention.sh` | 로컬 Docker, S3 는 Floci |
 | Java 25 + 에이전트 2.32.0 + logback → 스택 | `test/agent-probe.sh` | 로컬 JDK 25 |
+| 저장 전 마스킹 — 원문이 저장되지 않고 식별자는 그대로 | `test/masking.sh` | 로컬 Docker, S3 는 Floci |
 | 범용 디렉터리에 nova 없음 | `scripts/check-generic.sh` | 로컬 · CI |
 
 `smoke.sh` 는 아래를 차례로 확인한다.
