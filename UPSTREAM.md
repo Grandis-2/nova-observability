@@ -254,3 +254,33 @@ observation 쪽 작업(W24)이 이 파일만 읽고 반영할 수 있게 쓴다.
   - 패턴은 한국 휴대전화 기준이다. 다른 나라 번호 · 유선 전화 · 실명 · 주소는 걸리지 않는다. 범용으로 쓰려면 패턴 목록을 설정으로 뺀다.
   - 알려진 구멍과 오탐(README "걸리지 않는 것" · "오탐")을 같이 옮긴다.
   - 되돌릴 수 없다. 하네스의 디버깅 흐름이 원문을 기대한다면 로컬 프로필에서는 끌 수 있게 한다.
+
+## 10. 이미지에 jar 을 싣고 `JDK_JAVA_OPTIONS` 로 켠다 — JDK AOT 캐시와 같이
+
+- **파일**: `ecs/README.md` "이미지에 jar 을 싣는 경우", README "앱이 줄 값"
+- **하네스와 다른 점**
+  - 1 의 init 컨테이너 대신 앱 이미지에 jar 을 싣고, 작업 정의는 `JDK_JAVA_OPTIONS=-javaagent:…` 만 준다.
+    앱을 고칠 수 있는 팀이면 볼륨 · `dependsOn` 이 없어지고, 이미지가 `JAVA_TOOL_OPTIONS` 를 쓰더라도 2 의 병합 규칙이 필요 없다.
+  - JDK AOT 캐시를 쓰는 이미지는 학습 · 실행에 `--add-modules=java.instrument` 를 늘 넣는다. 에이전트가 모듈 구성을 바꿔 캐시가 거부되기 때문이다.
+  - 로그만 받으므로 logback 계측만 켠다(`OTEL_INSTRUMENTATION_COMMON_DEFAULT_ENABLED=false` · `OTEL_INSTRUMENTATION_LOGBACK_APPENDER_ENABLED=true`).
+- **실측** (로컬 Docker, Spring Boot 앱 한 서비스, 1 vCPU / 2 GiB, startup 학습 캐시, Temurin 25.0.4.1+1, 2026-10-11)
+
+  | 경우 | 기동 |
+  |---|---|
+  | 캐시 · 에이전트 없음 | 약 8–10초 |
+  | 캐시 + 에이전트 + `AOTMode=on` | JVM 이 뜨지 않음 — `jdk.module.addmods` 불일치 |
+  | 에이전트, 캐시 없음 (`auto` 가 이렇게 된다) | 약 21초 |
+  | `--add-modules` 맞춤 + 에이전트 계측 전부 | 약 17.5–20초 |
+  | `--add-modules` 맞춤 + logback 계측만 | 약 11.5–13.6초 |
+  | `--add-modules` 맞춤, 에이전트 없음 | 약 8–9초 |
+  | 학습 때 에이전트를 붙임 | 학습 중 SIGSEGV(`MethodTrainingData::cleanup`) |
+
+  - logback 계측만 켠 채 이 스택(로컬)으로 보냈다. outbox 발행 줄이 `event_id` 로 찾혔고 key-value 속성이 structured metadata 로 들어갔다.
+  - `JDK_JAVA_OPTIONS` 가 없으면 에이전트가 로드되지 않는다. 이미지 `JAVA_TOOL_OPTIONS` 의 `MaxRAMPercentage=75` 는 그대로다.
+- **미실측**
+  - 실제 ECS 태스크. 기동 시간은 Fargate CPU 에 따라 다르다.
+  - workload 학습 캐시와 다른 서비스. 앱 저장소의 CI 가 "캐시 + 에이전트 + `AOTMode=on`" 으로 띄워 확인한다.
+  - 리액티브 앱의 MDC 전달.
+- **observation 에 넣을 때 주의**
+  - 온보딩 문서에 두 경로(init 컨테이너 · 이미지 탑재)를 나란히 둔다. 버전 고정 위치가 앱 저장소의 Dockerfile 로 하나 더 생긴다.
+  - AOT 캐시 · CDS 를 쓰는 앱에는 모듈 플래그 항목을 넣는다. `auto` 에서는 조용히 느려지기만 하므로 `AOTMode=on` 확인을 권한다.
