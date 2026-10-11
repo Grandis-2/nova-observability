@@ -21,7 +21,7 @@ ECS 태스크 ──OTLP gRPC──▶ obs.<Cloud Map 네임스페이스>:4317
 | 경로 | 범위 | 내용 |
 |---|---|---|
 | `stack/` | 범용 | `compose.yaml` · `otel-collector.yaml`(로그만) · `loki.yaml`(S3 · 보존) · `grafana/`(Loki 데이터소스) |
-| `ecs/` | 범용 | 앱 작업 정의에 붙일 에이전트 주입 조각과 `JAVA_TOOL_OPTIONS` 병합 규칙 ([ecs/README.md](ecs/README.md)) |
+| `ecs/` | 범용 | 앱 작업 정의에 붙일 에이전트 주입 조각, `JAVA_TOOL_OPTIONS` 병합 규칙, 이미지에 jar 을 싣는 경우 ([ecs/README.md](ecs/README.md)) |
 | `test/` | — | 로컬 시험 (아래 "검증") |
 
 - 범용 부분은 나중에 observation 플랫폼으로 올라간다([UPSTREAM.md](UPSTREAM.md)). nova 값은 이 README 에만 둔다.
@@ -36,6 +36,7 @@ ECS 태스크 ──OTLP gRPC──▶ obs.<Cloud Map 네임스페이스>:4317
   - 같은 날 HIGH 는 4 · 4 · 12 개, CRITICAL 은 0 이다.
   - 설정은 바꾸지 않고 로컬 시험 셋을 모두 통과했다.
 - 에이전트: OpenTelemetry Java agent **2.32.0**. `ecs/` 의 init 이미지 `autoinstrumentation-java:2.32.0` 에 든 jar 은 GitHub 릴리스와 SHA-256 이 같다.
+  nova(be 이미지)도 같은 이미지 · 다이제스트에서 jar 을 복사한다.
   2.11.0 은 Java 25 에서 경고 없이 아무것도 내보내지 않는다.
 
 ## 호스트가 갖춰야 할 것
@@ -75,10 +76,13 @@ sudo cat <비밀번호 파일 경로> \
 
 ## 앱이 줄 값 (nova)
 
-작업 정의에 넣는 방법과 병합 규칙은 [ecs/README.md](ecs/README.md) 에 있다. nova 값은 다음과 같다.
+nova 는 `ecs/` 의 init 컨테이너를 쓰지 않는다. 에이전트 jar 은 be 이미지 `/otel/javaagent.jar` 에 들어 있고(be `docker/Dockerfile`, 같은 2.32.0 이미지에서 복사),
+nova-infra 가 켤 서비스의 작업 정의에 아래 환경 변수를 준다. 이유는 [ecs/README.md](ecs/README.md) "이미지에 jar 을 싣는 경우" 에 있다.
 
 ```
-JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError -javaagent:/otel/javaagent.jar
+JDK_JAVA_OPTIONS=-javaagent:/otel/javaagent.jar                      # 없으면 에이전트가 로드되지 않는다
+OTEL_INSTRUMENTATION_COMMON_DEFAULT_ENABLED=false                    # 계측은 logback 만 켠다(기동 시간)
+OTEL_INSTRUMENTATION_LOGBACK_APPENDER_ENABLED=true
 OTEL_SERVICE_NAME=nova-<svc>
 OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,service.namespace=nova
 OTEL_LOGS_EXPORTER=otlp
@@ -90,7 +94,11 @@ OTEL_INSTRUMENTATION_LOGBACK_APPENDER_EXPERIMENTAL_MDC_ATTRIBUTES_INCLUDED=trace
 OTEL_INSTRUMENTATION_COMMON_LOGGING_STRUCTURED_ATTRIBUTES_INCLUDED=event_id,aggregate_type,aggregate_id,event_type,destination
 ```
 
-- `JAVA_TOOL_OPTIONS` 앞의 두 플래그는 nova 앱 이미지(`docker/Dockerfile`)의 값이다. 이미지가 바뀌면 다시 확인한다.
+- `JAVA_TOOL_OPTIONS` 는 주지 않는다. be 이미지가 그 변수에 힙 옵션(`-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError`)을 넣어 두어서, 작업 정의가 주면 그 값이 사라진다.
+- be 이미지의 AOT 캐시는 학습 · 실행 모두 `--add-modules=java.instrument` 로 맞춰 두었다(be PR #182). 그래서 에이전트를 켜도 캐시가 쓰인다.
+  `JDK_JAVA_OPTIONS` 에 모듈 플래그를 더 넣거나 빼지 않는다.
+- 기동 시간(로컬, preorder 한 서비스 · 1 vCPU / 2 GiB): 에이전트 없이 약 8–9초, 위 값으로 약 11.5–13.6초, 계측 기본값(전부 켬)이면 약 17.5–20초.
+  헬스 체크 유예 시간은 이 차이를 감안한다.
 - MDC 는 `traceId`(요청 ID)만 받는다. `subject`(회원 ID)는 받지 않는다.
 - `aggregate_id` 는 숫자가 아니라 **UUID 문자열**이다. `destination` 은 outbox 가 발행한 큐 이름이다.
 
