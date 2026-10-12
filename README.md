@@ -1,5 +1,14 @@
 # nova-observability
 
+> **보관됨 (2026-10-13).** 이 저장소는 더 이상 운영에 쓰이지 않는다.
+> nova 의 관측 스택은 **LGTM on ECS** 로 바뀌어 `Grandis-2/nova-infra` 의 `terraform/aws/monitoring/lgtm/nova_apnortheast2/` 로 옮겼다.
+> - 설정(Collector · Loki · Grafana)과 시험(`test/`)은 그 스택의 `config/` 로 옮겨 넓혔다(Tempo · Mimir · 대시보드 · 경보).
+> - 실행은 전용 EC2 + docker compose 가 아니라 `nova-prod` ECS 클러스터의 EC2 1대 위 태스크 하나다.
+> - 앱은 be 이미지에 실린 에이전트를 nova-infra ecs 스택이 `JDK_JAVA_OPTIONS` 로 켠다(`otel.nova.local:4318`).
+>
+> 아래는 옮기기 전의 기록이다. observation 플랫폼으로 올릴 내용은 [UPSTREAM.md](UPSTREAM.md) 에 남긴다(11 이 LGTM 전환과 운영에서 배운 것).
+
+
 nova 백엔드의 로그를 받아 **90일** 보관하고 Grafana 로 조회하는 관측 스택의 **설정** 저장소다.
 OTel Collector · Loki · Grafana 를 docker compose 로 띄운다. 트레이스와 메트릭은 받지 않는다.
 
