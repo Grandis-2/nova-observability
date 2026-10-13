@@ -294,7 +294,7 @@ nova 는 이 저장소의 compose 스택 대신 nova-infra `monitoring/lgtm` 스
 |---|---|---|
 | Grafana 경보 문구 `bad character U+0024 '$'` | 프로비저닝 파일은 환경 변수로 한 번 펼쳐진다. `$values` 는 빈 값, `$$values` 는 `$$` 가 그대로 남는다 | 달러 변수 없이 `.Values` · `.Labels` 로 쓴다 |
 | 그다음 `can't convert <nil> to float` | `.Values` 에는 쿼리(A) 결과가 들어가지 않고 식(reduce · math · threshold)만 들어간다 | A(쿼리) → B(reduce: last) → C(threshold), 문구는 `{{ with .Values.B }}…{{ end }}` |
-| 경보 `DatasourceError` ("수집 실패" 규칙) | `rate({__name__=~"a|b|c"}[5m])` 는 이름 라벨을 지워 라벨이 같은 시계열이 겹친다 → Mimir `vector cannot contain metrics with the same labelset`. 로컬에는 카운터가 하나뿐이라 안 잡혔다 | 카운터마다 rate 하고 `label_replace` 로 구분 라벨을 붙여 `or` |
+| 경보 `DatasourceError` ("수집 실패" 규칙) | `rate({__name__=~"a\|b\|c"}[5m])` 는 이름 라벨을 지워 라벨이 같은 시계열이 겹친다 → Mimir `vector cannot contain metrics with the same labelset`. 로컬에는 카운터가 하나뿐이라 안 잡혔다 | 카운터마다 rate 하고 `label_replace` 로 구분 라벨을 붙여 `or` |
 | Collector → Tempo `failed to connect to [::1]:14317` 반복 | gRPC 가 `localhost` 를 IPv6 부터 붙는다 | 같은 태스크 안 주소는 `127.0.0.1` 로 고정 |
 | 대시보드 질의가 비어 있음 | Mimir 3 는 OTLP 지표 이름에 단위 접미사를 기본으로 붙이지 않는다 | `otel_metric_suffixes_enabled: true` (`http_server_request_duration_seconds_*`) |
 | 새 obs 인스턴스에서 CPU 크레딧 경보 | unlimited 모드 t4g 는 잔량 0 에서 시작한다 | 오탐. 잔량이 쌓이면 풀린다(지표를 바꿀지는 미정) |
