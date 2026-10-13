@@ -31,6 +31,26 @@ ghcr.io 에서 받으므로 태스크가 인터넷(NAT)에 닿아야 한다. 닿
 3. 배포 뒤 확인: `jcmd <pid> VM.flags` 에 기존 플래그가 남아 있는지 본다.
    `JAVA_TOOL_OPTIONS` 는 `jcmd` 같은 JDK 도구에도 적용된다. 그래도 에이전트는 도구를 알아보고 붙지 않는다(`JDK tool detected … agent will not be started`).
 
+## 이미지에 jar 을 싣는 경우
+
+앱 이미지를 고칠 수 있으면 init 컨테이너 대신 이미지에 jar 을 싣는 방법도 있다.
+- 이미지: 같은 init 이미지(태그 · 다이제스트 고정)에서 `COPY --from=<그 이미지> /javaagent.jar /otel/javaagent.jar`. `ENV` · `ENTRYPOINT` 는 바꾸지 않는다.
+- 작업 정의: 켤 서비스에 `JDK_JAVA_OPTIONS=-javaagent:/otel/javaagent.jar` 와 `OTEL_*` 를 준다. 위 `volumes` · init 컨테이너 · `dependsOn` · `mountPoints` 는 쓰지 않는다.
+  - 이미지가 `JDK_JAVA_OPTIONS` 를 쓰지 않으면 위 병합 규칙이 필요 없다. 작업 정의가 덮을 값이 없기 때문이다.
+  - `JDK_JAVA_OPTIONS` 는 `java` 실행기만 읽는다. `jcmd` 같은 JDK 도구에는 붙지 않는다.
+    `ENTRYPOINT` 가 `java` 를 직접 띄워야 한다(JNI 로 JVM 을 만드는 실행기는 이 변수를 읽지 않는다).
+  - 변수가 없으면 에이전트가 로드되지 않는다. 끄는 것은 변수를 빼는 것이다.
+- 레지스트리(ghcr.io)는 이미지를 만들 때만 닿으면 된다. 태스크가 인터넷에 닿을 필요가 없다.
+
+**JDK AOT 캐시(`-XX:AOTCache`)를 쓰는 이미지.** 에이전트는 `java.instrument` 모듈을 더한다.
+캐시를 만들 때와 모듈 구성이 달라지면 JVM 이 캐시를 거부한다(`Mismatched values for property jdk.module.addmods`).
+- `-XX:AOTMode=on` 이면 JVM 이 뜨지 않는다. 기본값(`auto`)이면 경고 없이 캐시 없이 뜬다. 기동만 느려지므로 알아채기 어렵다.
+- 학습과 실행 양쪽에 `--add-modules=java.instrument` 를 늘 넣으면 에이전트를 켜도 끄도 캐시가 쓰인다. 에이전트가 없을 때의 손해는 재지 못할 만큼 작았다.
+- 학습할 때 에이전트를 붙이는 방법은 쓰지 않는다. JDK 25.0.4 에서 학습 중 JVM 이 죽었다(`MethodTrainingData::cleanup` SIGSEGV).
+- 계측이 많을수록 기동이 늦다. 로그만 받는다면 `OTEL_INSTRUMENTATION_COMMON_DEFAULT_ENABLED=false` · `OTEL_INSTRUMENTATION_LOGBACK_APPENDER_ENABLED=true` 로 logback 계측만 켠다.
+  이 스택은 로그만 받으므로 다른 계측은 쓸모가 없다.
+- 확인 방법: 에이전트를 켠 채 `-XX:AOTMode=on` 으로 한 번 띄운다. 뜨면 캐시가 받아들여진 것이다.
+
 ## 환경 변수에서 틀리기 쉬운 것
 
 - **`OTEL_EXPORTER_OTLP_PROTOCOL=grpc` 를 빼지 않는다.** 에이전트 기본값은 `http/protobuf` 다.
@@ -46,5 +66,5 @@ ghcr.io 에서 받으므로 태스크가 인터넷(NAT)에 닿아야 한다. 닿
 ## 확인하지 않은 것
 
 - 실제 Fargate 에서의 동작 전체(init 컨테이너 순서, `readonlyRootFilesystem`, 볼륨 권한). 위 내용은 로컬 JVM 과 이미지 검사로 확인한 것이다
-- 에이전트를 붙인 뒤의 기동 시간 증가. 헬스체크 유예 시간은 배포하면서 잰다
+- 실제 태스크에서 에이전트를 붙인 뒤의 기동 시간 증가. 로컬 수치는 UPSTREAM 10 에 있다. 헬스체크 유예 시간은 배포하면서 잰다
 - init 컨테이너에 메모리 예약을 따로 주지 않았다. 태스크 메모리 안에서 잠깐 돌고 끝난다

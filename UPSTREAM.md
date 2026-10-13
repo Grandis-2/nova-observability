@@ -254,3 +254,53 @@ observation 쪽 작업(W24)이 이 파일만 읽고 반영할 수 있게 쓴다.
   - 패턴은 한국 휴대전화 기준이다. 다른 나라 번호 · 유선 전화 · 실명 · 주소는 걸리지 않는다. 범용으로 쓰려면 패턴 목록을 설정으로 뺀다.
   - 알려진 구멍과 오탐(README "걸리지 않는 것" · "오탐")을 같이 옮긴다.
   - 되돌릴 수 없다. 하네스의 디버깅 흐름이 원문을 기대한다면 로컬 프로필에서는 끌 수 있게 한다.
+
+## 10. 이미지에 jar 을 싣고 `JDK_JAVA_OPTIONS` 로 켠다 — JDK AOT 캐시와 같이
+
+- **파일**: `ecs/README.md` "이미지에 jar 을 싣는 경우", README "앱이 줄 값"
+- **하네스와 다른 점**
+  - 1 의 init 컨테이너 대신 앱 이미지에 jar 을 싣고, 작업 정의는 `JDK_JAVA_OPTIONS=-javaagent:…` 만 준다.
+    앱을 고칠 수 있는 팀이면 볼륨 · `dependsOn` 이 없어지고, 이미지가 `JAVA_TOOL_OPTIONS` 를 쓰더라도 2 의 병합 규칙이 필요 없다.
+  - JDK AOT 캐시를 쓰는 이미지는 학습 · 실행에 `--add-modules=java.instrument` 를 늘 넣는다. 에이전트가 모듈 구성을 바꿔 캐시가 거부되기 때문이다.
+  - 로그만 받으므로 logback 계측만 켠다(`OTEL_INSTRUMENTATION_COMMON_DEFAULT_ENABLED=false` · `OTEL_INSTRUMENTATION_LOGBACK_APPENDER_ENABLED=true`).
+- **실측** (로컬 Docker, Spring Boot 앱 한 서비스, 1 vCPU / 2 GiB, startup 학습 캐시, Temurin 25.0.4.1+1, 2026-10-11)
+
+  | 경우 | 기동 |
+  |---|---|
+  | 캐시 · 에이전트 없음 | 약 8–10초 |
+  | 캐시 + 에이전트 + `AOTMode=on` | JVM 이 뜨지 않음 — `jdk.module.addmods` 불일치 |
+  | 에이전트, 캐시 없음 (`auto` 가 이렇게 된다) | 약 21초 |
+  | `--add-modules` 맞춤 + 에이전트 계측 전부 | 약 17.5–20초 |
+  | `--add-modules` 맞춤 + logback 계측만 | 약 11.5–13.6초 |
+  | `--add-modules` 맞춤, 에이전트 없음 | 약 8–9초 |
+  | 학습 때 에이전트를 붙임 | 학습 중 SIGSEGV(`MethodTrainingData::cleanup`) |
+
+  - logback 계측만 켠 채 이 스택(로컬)으로 보냈다. outbox 발행 줄이 `event_id` 로 찾혔고 key-value 속성이 structured metadata 로 들어갔다.
+  - `JDK_JAVA_OPTIONS` 가 없으면 에이전트가 로드되지 않는다. 이미지 `JAVA_TOOL_OPTIONS` 의 `MaxRAMPercentage=75` 는 그대로다.
+- **미실측**
+  - 실제 ECS 태스크. 기동 시간은 Fargate CPU 에 따라 다르다.
+  - workload 학습 캐시와 다른 서비스. 앱 저장소의 CI 가 "캐시 + 에이전트 + `AOTMode=on`" 으로 띄워 확인한다.
+  - 리액티브 앱의 MDC 전달.
+- **observation 에 넣을 때 주의**
+  - 온보딩 문서에 두 경로(init 컨테이너 · 이미지 탑재)를 나란히 둔다. 버전 고정 위치가 앱 저장소의 Dockerfile 로 하나 더 생긴다.
+  - AOT 캐시 · CDS 를 쓰는 앱에는 모듈 플래그 항목을 넣는다. `auto` 에서는 조용히 느려지기만 하므로 `AOTMode=on` 확인을 권한다.
+
+## 11. LGTM on ECS 로 옮긴 뒤 운영에서 배운 것 (2026-10-12 · 13)
+
+nova 는 이 저장소의 compose 스택 대신 nova-infra `monitoring/lgtm` 스택(ECS 태스크 하나에 Collector · Loki · Tempo · Mimir · Grafana)으로 옮겼다.
+설정 · 시험은 이 저장소에서 가져가 넓혔다. 아래는 실제 운영에 올리며 부딪힌 것이고, observation 의 프로비저닝 · 경보 규칙에도 그대로 해당한다.
+
+| 증상 | 원인 | 고친 것 |
+|---|---|---|
+| Grafana 경보 문구 `bad character U+0024 '$'` | 프로비저닝 파일은 환경 변수로 한 번 펼쳐진다. `$values` 는 빈 값, `$$values` 는 `$$` 가 그대로 남는다 | 달러 변수 없이 `.Values` · `.Labels` 로 쓴다 |
+| 그다음 `can't convert <nil> to float` | `.Values` 에는 쿼리(A) 결과가 들어가지 않고 식(reduce · math · threshold)만 들어간다 | A(쿼리) → B(reduce: last) → C(threshold), 문구는 `{{ with .Values.B }}…{{ end }}` |
+| 경보 `DatasourceError` ("수집 실패" 규칙) | `rate({__name__=~"a\|b\|c"}[5m])` 는 이름 라벨을 지워 라벨이 같은 시계열이 겹친다 → Mimir `vector cannot contain metrics with the same labelset`. 로컬에는 카운터가 하나뿐이라 안 잡혔다 | 카운터마다 rate 하고 `label_replace` 로 구분 라벨을 붙여 `or` |
+| Collector → Tempo `failed to connect to [::1]:14317` 반복 | gRPC 가 `localhost` 를 IPv6 부터 붙는다 | 같은 태스크 안 주소는 `127.0.0.1` 로 고정 |
+| 대시보드 질의가 비어 있음 | Mimir 3 는 OTLP 지표 이름에 단위 접미사를 기본으로 붙이지 않는다 | `otel_metric_suffixes_enabled: true` (`http_server_request_duration_seconds_*`) |
+| 새 obs 인스턴스에서 CPU 크레딧 경보 | unlimited 모드 t4g 는 잔량 0 에서 시작한다 | 오탐. 잔량이 쌓이면 풀린다(지표를 바꿀지는 미정) |
+| 에이전트를 켠 첫 기동 30초, 두 번째 19초(이전 9–13초) | 에이전트 초기화. AOT 캐시는 에이전트 없이 학습한 것이라 효과가 1–3초뿐 | 학습을 에이전트 켠 상태로 바꾸는 실험 중(학습 때 계측 전부 켜면 JDK 25.0.4 에서 SIGSEGV) |
+| MySQL 지표 계정에 PROCESS 를 줄 수 없음 | NCP Cloud DB 권한은 READ · CRUD · DDL 뿐 | READ 계정 + 그 권한이 필요한 수집기 끔. 복제 · InnoDB 압축 지표는 없다 |
+
+- **시험의 한계**: 로컬 시험은 설정 문법과 경로를 잘 잡았지만, 실제 앱이 내는 지표 종류 · 규칙 평가 · 템플릿 렌더링은 운영 데이터가 들어와야 드러났다. 경보 규칙은 "값이 채워진 상태에서 문구가 렌더링되는지" 를 시험에 넣는다.
+- **보관한 결정 기록**: 이 저장소의 README · ecs/ · 1–10 은 옮기기 전의 판단 근거로 남긴다.
+
